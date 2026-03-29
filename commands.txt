@@ -1,1 +1,1 @@
-import pyautogui; pyautogui.screenshot("screen.png")
+py -m pip install pygame
